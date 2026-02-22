@@ -15,7 +15,7 @@ from transformer_lens import HookedTransformer
 
 
 def slug(base_name="my-benchmark"):
-    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     clean_name = re.sub(r"[^a-z0-9]+", "-", base_name.lower()).strip("-")
     slug = f"{timestamp_str}_{clean_name}"
 
@@ -23,7 +23,7 @@ def slug(base_name="my-benchmark"):
 
 
 def load_config(args):
-    config = {"output_dir": args.output_dir}
+    config = {"output_dir": args.output_dir, "batch_size": args.batch_size}
 
     with open(args.config, "r") as config_file:
         config.update(yaml.safe_load(config_file))
@@ -42,23 +42,27 @@ def save_results(norms: np.ndarray, slug: str, config: dict):
     df_long.to_csv(output_path, index=None)
 
 
-def prepare_dataset(config: dict) -> list[str]:
+def prepare_dataset(config: dict, batch_size: int) -> list[list[str]]:
     ds = load_dataset(
         path=config.get("path"), name=config.get("name"), split=config.get("split")
     )
 
     prompts = [format_arc(entry) for entry in ds]
+    batches = [prompts[i : i + batch_size] for i in range(0, len(prompts), batch_size)]
 
-    return prompts
+    return batches
 
 
 def format_arc(entry):
     question = entry["question"]
     choices = entry["choices"]
 
+    answers = "\n".join(
+        [f"{label}) {text}" for label, text in zip(choices["label"], choices["text"])]
+    )
+
     return f"""{question}
-{"\n".join([f"{label}) {text}" for label, text in zip(choices["label"], choices["text"])])}
-"""
+{answers}"""
 
 
 # Filter for saving activations from resid_pre and resid_post layers only
@@ -67,35 +71,46 @@ def resid_names_filter(name: str) -> bool:
 
 
 def extract_activation_transformation_norms(
-    model_name: str, prompts: list[str], device=None
+    model_name: str, batches: list[list[str]], device=None
 ) -> np.ndarray:
     model = HookedTransformer.from_pretrained(model_name, device=device)
+    norms = [[] for _ in range(model.cfg.n_layers)]
 
-    _, cache = model.run_with_cache(
-        prompts, names_filter=resid_names_filter, return_type=None
-    )
+    for batch in batches:
+        _, cache = model.run_with_cache(
+            batch, names_filter=resid_names_filter, return_type=None
+        )
 
-    # Calculate the norms
-    pre = cache.stack_activation("resid_pre")
-    post = cache.stack_activation("resid_post")
-    norms = (post - pre).norm(dim=-1)
+        # (n_layer, n_batch, n_pos, d_model)
+        pre = cache.stack_activation("resid_pre")
+        post = cache.stack_activation("resid_post")
+        batch_norms = (post - pre).norm(dim=-1)  # (n_layer, n_batch, n_pos)
 
-    # Mask out padding tokens, which tend to get "stretched" noticably more than other tokens
-    tokens = model.to_tokens(prompts)
-    attention_mask = tokens != model.tokenizer.pad_token_type_id
+        # Pick not-pad tokens
+        tokens = model.to_tokens(batch)
+        attention_mask = tokens != model.tokenizer.pad_token_type_id
 
-    return norms[:, attention_mask].cpu().numpy()
+        batch_norms_masked = (
+            batch_norms[:, attention_mask].cpu().tolist()
+        )  # (n_layers, n_total_tokens)
+
+        for layer, layer_norms in enumerate(batch_norms_masked):
+            for norm in layer_norms:
+                norms[layer].append(norm)
+
+    return np.array(norms)
 
 
 def main(config: dict):
     torch.set_grad_enabled(False)
     device = utils.get_device()
-    prompts = prepare_dataset(config["dataset"])
+    batches = prepare_dataset(config["dataset"], config["batch_size"])
     print("loaded dataset")
 
     for model in config["models"]:
         print(f"running {model}")
-        norms = extract_activation_transformation_norms(model, prompts, device)
+        norms = extract_activation_transformation_norms(model, batches, device)
+
         print(f"saving {model}")
         save_results(norms, slug(model), config)
 
@@ -103,7 +118,8 @@ def main(config: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config")
-    parser.add_argument("-od", "--output_dir")
+    parser.add_argument("-od", "--output_dir", default="./data")
+    parser.add_argument("-bs", "--batch-size", default=100)
     args = parser.parse_args()
 
     config = load_config(args)
