@@ -24,21 +24,22 @@ def slug(base_name="my-benchmark"):
 
 def load_config(args):
     config = {
-        "output_dir": args.output_dir,
-        "cache_dir": args.cache_dir,
+        "output_dir": Path(args.output_dir),
+        "cache_dir": Path(args.cache_dir),
         "batch_size": args.batch_size,
     }
 
     with open(args.config, "r") as config_file:
         config.update(yaml.safe_load(config_file))
 
+    os.makedirs(config["output_dir"], exist_ok=True)
+    os.makedirs(config["cache_dir"], exist_ok=True)
+
     return config
 
 
 def save_results(norms: np.ndarray, slug: str, config: dict):
-    output_dir = Path(config.get("output_dir", "."))
-    output_path = output_dir / f"{slug}.csv"
-    os.makedirs(output_dir, exist_ok=True)
+    output_path = config["output_dir"] / f"{slug}.csv"
 
     num_layers = norms.shape[0]
     df_wide = pd.DataFrame(norms.T, columns=range(num_layers))
@@ -133,7 +134,7 @@ def main(config: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config")
-    parser.add_argument("-cd", "--cache_dir", default="./cache")
+    parser.add_argument("-cd", "--cache_dir", default="./.cache")
     parser.add_argument("-od", "--output_dir", default="./data")
     parser.add_argument("-bs", "--batch-size", default=100)
     args = parser.parse_args()
