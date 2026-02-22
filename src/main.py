@@ -23,7 +23,11 @@ def slug(base_name="my-benchmark"):
 
 
 def load_config(args):
-    config = {"output_dir": args.output_dir, "batch_size": args.batch_size}
+    config = {
+        "output_dir": args.output_dir,
+        "cache_dir": args.cache_dir,
+        "batch_size": args.batch_size,
+    }
 
     with open(args.config, "r") as config_file:
         config.update(yaml.safe_load(config_file))
@@ -42,9 +46,14 @@ def save_results(norms: np.ndarray, slug: str, config: dict):
     df_long.to_csv(output_path, index=None)
 
 
-def prepare_dataset(config: dict, batch_size: int) -> list[list[str]]:
+def prepare_dataset(
+    config: dict, batch_size: int, cache_dir: str | None = None
+) -> list[list[str]]:
     ds = load_dataset(
-        path=config.get("path"), name=config.get("name"), split=config.get("split")
+        path=config.get("path"),
+        name=config.get("name"),
+        split=config.get("split"),
+        cache_dir=cache_dir,
     )
 
     prompts = [format_arc(entry) for entry in ds]
@@ -71,9 +80,11 @@ def resid_names_filter(name: str) -> bool:
 
 
 def extract_activation_transformation_norms(
-    model_name: str, batches: list[list[str]], device=None
+    model_name: str, batches: list[list[str]], device=None, cache_dir: str | None = None
 ) -> np.ndarray:
-    model = HookedTransformer.from_pretrained(model_name, device=device)
+    model = HookedTransformer.from_pretrained(
+        model_name, device=device, cache_dir=cache_dir
+    )
     norms = [[] for _ in range(model.cfg.n_layers)]
 
     for batch in batches:
@@ -104,12 +115,16 @@ def extract_activation_transformation_norms(
 def main(config: dict):
     torch.set_grad_enabled(False)
     device = utils.get_device()
-    batches = prepare_dataset(config["dataset"], config["batch_size"])
+    batches = prepare_dataset(
+        config["dataset"], config["batch_size"], cache_dir=config["cache_dir"]
+    )
     print("loaded dataset")
 
     for model in config["models"]:
         print(f"running {model}")
-        norms = extract_activation_transformation_norms(model, batches, device)
+        norms = extract_activation_transformation_norms(
+            model, batches, device, cache_dir=config["cache_dir"]
+        )
 
         print(f"saving {model}")
         save_results(norms, slug(model), config)
@@ -118,6 +133,7 @@ def main(config: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config")
+    parser.add_argument("-cd", "--cache_dir", default="./cache")
     parser.add_argument("-od", "--output_dir", default="./data")
     parser.add_argument("-bs", "--batch-size", default=100)
     args = parser.parse_args()
