@@ -73,10 +73,10 @@ def prepare_dataset(
     config: Config,
 ) -> list[list[str]]:
     ds = load_dataset(
-        path=Config.dataset.path,
-        name=Config.dataset.name,
-        split=Config.dataset.split,
-        cache_dir=str(Config.cache_dir),
+        path=config.dataset.path,
+        name=config.dataset.name,
+        split=config.dataset.split,
+        cache_dir=str(config.cache_dir),
     )
 
     prompts = [format_arc(entry) for entry in ds]
@@ -157,4 +157,5 @@ def main(config: Config):
 
 if __name__ == "__main__":
     config = load_config(parse_args())
+    print(config)
     main(config)
