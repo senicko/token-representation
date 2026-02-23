@@ -1,9 +1,6 @@
 import argparse
 import datetime
-import os
 import re
-from pathlib import Path
-from pprint import pprint
 
 import numpy as np
 import pandas as pd
@@ -11,7 +8,23 @@ import torch
 import transformer_lens.utils as utils
 import yaml
 from datasets import load_dataset
+from pydantic import BaseModel, DirectoryPath
 from transformer_lens import HookedTransformer
+
+
+class DatasetConfig(BaseModel):
+    path: str
+    name: str
+    split: str
+
+
+class Config(BaseModel):
+    slug: str
+    output_dir: DirectoryPath
+    cache_dir: DirectoryPath
+    batch_size: int
+    models: list[str]
+    dataset: DatasetConfig
 
 
 def slug(base_name="my-benchmark"):
@@ -22,43 +35,56 @@ def slug(base_name="my-benchmark"):
     return slug
 
 
-def load_config(args):
-    config = {
-        "output_dir": Path(args.output_dir),
-        "cache_dir": Path(args.cache_dir),
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--config")
+    parser.add_argument("--cache_dir", default="./.cache")
+    parser.add_argument("--output_dir", default="./data")
+    parser.add_argument("--batch-size", default=100)
+
+    return parser.parse_args()
+
+
+def load_config(args) -> Config:
+    raw_config = {
+        "output_dir": args.output_dir,
+        "cache_dir": args.cache_dir,
         "batch_size": args.batch_size,
+        "slug": slug(),
     }
 
     with open(args.config, "r") as config_file:
-        config.update(yaml.safe_load(config_file))
+        raw_config.update(yaml.safe_load(config_file))
 
-    os.makedirs(config["output_dir"], exist_ok=True)
-    os.makedirs(config["cache_dir"], exist_ok=True)
-
-    return config
+    return Config.model_validate(raw_config)
 
 
-def save_results(norms: np.ndarray, slug: str, config: dict):
-    output_path = config["output_dir"] / f"{slug}.csv"
-
+def save_results(norms: np.ndarray, slug: str, config: Config):
+    output_path = config.output_dir / f"{slug}.csv"
     num_layers = norms.shape[0]
+
     df_wide = pd.DataFrame(norms.T, columns=range(num_layers))
     df_long = df_wide.melt(var_name="layer", value_name="norm")
-    df_long.to_csv(output_path, index=None)
+    df_long.to_csv(output_path, index=False)
 
 
 def prepare_dataset(
-    config: dict, batch_size: int, cache_dir: str | None = None
+    config: Config,
 ) -> list[list[str]]:
     ds = load_dataset(
-        path=config.get("path"),
-        name=config.get("name"),
-        split=config.get("split"),
-        cache_dir=cache_dir,
+        path=Config.dataset.path,
+        name=Config.dataset.name,
+        split=Config.dataset.split,
+        cache_dir=str(Config.cache_dir),
     )
 
     prompts = [format_arc(entry) for entry in ds]
-    batches = [prompts[i : i + batch_size] for i in range(0, len(prompts), batch_size)]
+
+    batches = [
+        prompts[i : i + config.batch_size]
+        for i in range(0, len(prompts), config.batch_size)
+    ]
 
     return batches
 
@@ -113,18 +139,16 @@ def extract_activation_transformation_norms(
     return np.array(norms)
 
 
-def main(config: dict):
+def main(config: Config):
     torch.set_grad_enabled(False)
     device = utils.get_device()
-    batches = prepare_dataset(
-        config["dataset"], config["batch_size"], cache_dir=config["cache_dir"]
-    )
+    batches = prepare_dataset(config)
     print("loaded dataset")
 
-    for model in config["models"]:
+    for model in config.models:
         print(f"running {model}")
         norms = extract_activation_transformation_norms(
-            model, batches, device, cache_dir=config["cache_dir"]
+            model, batches, device, cache_dir=str(config.cache_dir)
         )
 
         print(f"saving {model}")
@@ -132,14 +156,5 @@ def main(config: dict):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config")
-    parser.add_argument("-cd", "--cache_dir", default="./.cache")
-    parser.add_argument("-od", "--output_dir", default="./data")
-    parser.add_argument("-bs", "--batch-size", default=100)
-    args = parser.parse_args()
-
-    config = load_config(args)
-    pprint(f"{config}")
-
+    config = load_config(parse_args())
     main(config)
