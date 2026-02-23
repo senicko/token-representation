@@ -168,11 +168,15 @@ def main(config: Config):
     batches = prepare_dataset(config)
 
     for model in config.models:
+        print(f"processing model {model}")
+
         transformations, normalized_transformations = (
             extract_activation_transformation_norms(
                 model, batches, device, cache_dir=str(config.cache_dir)
             )
         )
+
+        print(f"saving results {model}")
 
         save_results(transformations, slug(model), config)
         save_results(normalized_transformations, slug(model) + "normalized", config)
