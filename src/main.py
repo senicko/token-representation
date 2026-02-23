@@ -60,11 +60,11 @@ def load_config(args) -> Config:
     return Config.model_validate(raw_config)
 
 
-def save_results(norms: np.ndarray, slug: str, config: Config):
+def save_results(results: np.ndarray, slug: str, config: Config):
     output_path = config.output_dir / f"{slug}.csv"
-    num_layers = norms.shape[0]
+    num_layers = results.shape[0]
 
-    df_wide = pd.DataFrame(norms.T, columns=range(num_layers))
+    df_wide = pd.DataFrame(results.T, columns=range(num_layers))
     df_long = df_wide.melt(var_name="layer", value_name="norm")
     df_long.to_csv(output_path, index=False)
 
@@ -108,51 +108,74 @@ def resid_names_filter(name: str) -> bool:
 
 def extract_activation_transformation_norms(
     model_name: str, batches: list[list[str]], device=None, cache_dir: str | None = None
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     model = HookedTransformer.from_pretrained(
         model_name, device=device, cache_dir=cache_dir
     )
-    norms = [[] for _ in range(model.cfg.n_layers)]
+
+    transformations = [[] for _ in range(model.cfg.n_layers)]
+    normalized_transformations = [[] for _ in range(model.cfg.n_layers)]
 
     for batch in batches:
         _, cache = model.run_with_cache(
             batch, names_filter=resid_names_filter, return_type=None
         )
 
+        # Stack pre and post activations
         # (n_layer, n_batch, n_pos, d_model)
+
         pre = cache.stack_activation("resid_pre")
         post = cache.stack_activation("resid_post")
-        batch_norms = (post - pre).norm(dim=-1)  # (n_layer, n_batch, n_pos)
 
-        # Pick not-pad tokens
+        # Calculate transformation norms and normalized transformation norms
+        # (n_layer, n_batch, n_pos)
+
+        pre_norms = pre.norm(dim=-1)
+        batch_transformations = (post - pre).norm(dim=-1)
+        batch_normalized_transformations = batch_transformations / pre_norms
+
+        # Save batch results to global ones
+        # (n_layers, n_total_tokens)
+
         tokens = model.to_tokens(batch)
         attention_mask = tokens != model.tokenizer.pad_token_type_id
 
-        batch_norms_masked = (
-            batch_norms[:, attention_mask].cpu().tolist()
-        )  # (n_layers, n_total_tokens)
+        batch_transformations_masked = (
+            batch_transformations[:, attention_mask].cpu().tolist()
+        )
 
-        for layer, layer_norms in enumerate(batch_norms_masked):
-            for norm in layer_norms:
-                norms[layer].append(norm)
+        batch_normalized_transformations_masked = (
+            batch_normalized_transformations[:, attention_mask].cpu().tolist()
+        )
 
-    return np.array(norms)
+        # Figure how much tokens there is per layer.
+        # First layer is present for sure, so it's picked arbitrarily.
+        n_layer_tokens = len(batch_transformations_masked[0])
+
+        for layer in range(model.cfg.n_layers):
+            for norm in range(n_layer_tokens):
+                transformations[layer].append(batch_transformations_masked[layer][norm])
+                normalized_transformations[layer].append(
+                    batch_normalized_transformations_masked[layer][norm]
+                )
+
+    return np.array(transformations), np.array(normalized_transformations)
 
 
 def main(config: Config):
     torch.set_grad_enabled(False)
     device = utils.get_device()
     batches = prepare_dataset(config)
-    print("loaded dataset")
 
     for model in config.models:
-        print(f"running {model}")
-        norms = extract_activation_transformation_norms(
-            model, batches, device, cache_dir=str(config.cache_dir)
+        transformations, normalized_transformations = (
+            extract_activation_transformation_norms(
+                model, batches, device, cache_dir=str(config.cache_dir)
+            )
         )
 
-        print(f"saving {model}")
-        save_results(norms, slug(model), config)
+        save_results(transformations, slug(model), config)
+        save_results(normalized_transformations, slug(model) + "normalized", config)
 
 
 if __name__ == "__main__":
